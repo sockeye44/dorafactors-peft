@@ -206,7 +206,8 @@ class DoraLinearVariant(LoraVariant):
         delta_weight = module.get_delta_weight(active_adapter)
         weight_norm = module._cache_pop(f"{active_adapter}-weight_norm")
         dora_factor = module.lora_magnitude_vector[active_adapter].weight / weight_norm
-        new_weight = orig_weight.data / dora_factor.view(-1, 1) - delta_weight
+        dora_factor = transpose(dora_factor.view(-1, 1), module.fan_in_fan_out)
+        new_weight = orig_weight.data / dora_factor - delta_weight
         new_weight = new_weight.to(orig_dtype)
         return new_weight
 
@@ -222,6 +223,7 @@ class DoraLinearVariant(LoraVariant):
         lora_B = module.lora_B[active_adapter]
         dropout = module.lora_dropout[active_adapter]
         scaling = module.scaling[active_adapter]
+        base_layer = module.get_base_layer()
 
         if isinstance(dropout, nn.Identity) or not module.training:
             base_result = result
@@ -229,14 +231,56 @@ class DoraLinearVariant(LoraVariant):
             x = dropout(x)
             base_result = None
 
-        result = result + module.lora_magnitude_vector[active_adapter](
+        delta = module.lora_magnitude_vector[active_adapter](
             x,
             lora_A=lora_A,
             lora_B=lora_B,
             scaling=scaling,
-            base_layer=module.get_base_layer(),
+            base_layer=base_layer,
             base_result=base_result,
         )
+        # When bias is not None, the caller already computed `base_result = result - bias`,
+        # producing a new tensor, so `base_result is not result` and no aliasing occurs.
+        delta_depends_on_result = (base_result is result) and (getattr(base_layer, "bias", None) is None)
+
+        if delta.dtype != result.dtype:
+            delta = delta.to(result.dtype)
+
+        # When delta was computed from the same result tensor (common with
+        # bias=False and Identity dropout), the compose expression inside
+        # DoraLinearLayer saved base_result (= result) in its autograd graph.
+        # Any in-place mutation of result would corrupt that saved tensor —
+        # even if result itself has no grad_fn (e.g. frozen base, first layer
+        # where input embeddings don't require grad).
+        if delta_depends_on_result and torch.is_grad_enabled():
+            return result + delta
+
+        # Prefer in-place accumulation to avoid a second full-size activation
+        # buffer, but fall back when `result` is a protected view coming from a
+        # custom Function (seen with some quantized backends).
+        #
+        # Safety invariant: reaching this point means ``delta_depends_on_result``
+        # is False, which relies on one of:
+        #   (a) ``base_result is not result`` — dropout produced a new tensor, or
+        #   (b) ``bias is not None`` — the magnitude-vector forward computes
+        #       ``base_result = base_result - bias``, producing a new tensor and
+        #       breaking the aliasing *inside* the magnitude computation.
+        #
+        # If a future refactor changes the bias path to in-place subtraction
+        # (e.g. ``base_result.sub_(bias)``), case (b) would no longer break
+        # aliasing, and the ``base_result is result`` identity check above
+        # would fail to detect it.  Should that happen, replace the identity
+        # check with ``base_result.data_ptr() == result.data_ptr()``.
+        try:
+            result = result.add_(delta)
+        except RuntimeError as exc:
+            err = str(exc)
+            if (
+                "view was created in no_grad mode" not in err
+                and "is a view and is being modified inplace" not in err
+            ):
+                raise
+            result = result + delta
         return result
 
 
@@ -318,15 +362,20 @@ class DoraEmbeddingVariant(DoraLinearVariant):
         embedding_B = module.lora_embedding_B[active_adapter].T
         scaling = module.scaling[active_adapter]
 
-        mag_norm_scale, dora_result = module.lora_magnitude_vector[active_adapter](
+        _mag_norm_scale, dora_result = module.lora_magnitude_vector[active_adapter](
             x,
             lora_A=embedding_A,
             lora_B=embedding_B,
             scaling=scaling,
             base_layer=module.get_base_layer(),
             embed_fn=module._embed,
+            base_result=result,
         )
-        result = mag_norm_scale * result + dora_result
+        if dora_result.dtype != result.dtype:
+            dora_result = dora_result.to(result.dtype)
+        # Out-of-place accumulation avoids autograd versioning issues because
+        # `base_result=result` participates in the delta computation above.
+        result = result + dora_result
         return result
 
 

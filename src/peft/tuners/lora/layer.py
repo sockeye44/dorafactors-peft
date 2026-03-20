@@ -858,7 +858,10 @@ class Linear(nn.Module, LoraLayer):
                 scaling = self.scaling[active_adapter]
                 x = self._cast_input_dtype(x, lora_A.weight.dtype)
                 if active_adapter not in self.lora_variant:  # vanilla LoRA
-                    result = result + lora_B(lora_A(dropout(x))) * scaling
+                    delta = lora_B(lora_A(dropout(x)))
+                    if delta.dtype != torch_result_dtype:
+                        delta = delta.to(torch_result_dtype)
+                    result.add_(delta, alpha=scaling)
                 else:
                     result = self.lora_variant[active_adapter].forward(
                         self,
@@ -1149,7 +1152,10 @@ class Embedding(nn.Module, LoraLayer):
                     embedding_B = self.lora_embedding_B[active_adapter].T
                     scaling = self.scaling[active_adapter]
                     after_A = self._embed(x, embedding_A)
-                    result = result + (after_A @ embedding_B) * scaling
+                    delta = after_A @ embedding_B
+                    if delta.dtype != torch_result_dtype:
+                        delta = delta.to(torch_result_dtype)
+                    result.add_(delta, alpha=scaling)
                 else:
                     result = self.lora_variant[active_adapter].forward(
                         self,
@@ -1458,7 +1464,10 @@ class _ConvNd(nn.Module, LoraLayer):
                 x = self._cast_input_dtype(x, lora_A.weight.dtype)
 
                 if active_adapter not in self.lora_variant:  # vanilla LoRA
-                    result = result + lora_B(lora_A(dropout(x))) * scaling
+                    delta = lora_B(lora_A(dropout(x)))
+                    if delta.dtype != torch_result_dtype:
+                        delta = delta.to(torch_result_dtype)
+                    result.add_(delta, alpha=scaling)
                 else:
                     result = self.lora_variant[active_adapter].forward(
                         self,

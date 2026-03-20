@@ -34,18 +34,17 @@ ignore = [
 lines-after-imports = 2
 known-first-party = ["peft"]
 
-[tool.pytest]
+[tool.pytest.ini_options]
 doctest_optionflags = [
     "NORMALIZE_WHITESPACE",
     "ELLIPSIS",
     "NUMBER",
 ]
-
-[tool.pytest.ini_options]
-addopts = "--cov=src/peft --cov-report=term-missing --durations=10"
+addopts = "--durations=100"
 markers = [
     "single_gpu_tests: tests that run on a single GPU",
     "multi_gpu_tests: tests that run on multiple GPUs",
     "regression: whether to run regression suite test",
-    "bitsandbytes: select bitsandbytes integration tests"
+    "bitsandbytes: select bitsandbytes integration tests",
+    "benchmark: performance benchmark tests (GPU recommended)"
 ]

@@ -503,6 +503,28 @@ def set_peft_model_state_dict(
                 return k
 
             peft_model_state_dict = {renamed_dora_weights(k): v for k, v in peft_model_state_dict.items()}
+
+            # Warn if loading a DoRA-embedding checkpoint that predates the composition
+            # formula fix.  Old formula: base + mag*s*lora (missing the (mag-1)*base term).
+            # New formula: (mag-1)*base + mag*s*lora (matches DoRA paper §4.3).
+            # Checkpoints saved with PEFT versions prior to this fix will produce
+            # silently different outputs when loaded into the corrected code.
+            if getattr(config, "use_dora", False):
+                has_embedding_keys = any("lora_embedding_A" in k or "lora_embedding_B" in k for k in peft_model_state_dict)
+                has_magnitude = any("lora_magnitude_vector" in k for k in peft_model_state_dict)
+                dora_version = getattr(config, "_dora_composition_version", None)
+                if has_embedding_keys and has_magnitude and dora_version is None:
+                    warnings.warn(
+                        "Loading a DoRA checkpoint that contains embedding layers but lacks a "
+                        "'_dora_composition_version' marker. The DoRA embedding layer return-value "
+                        "contract was corrected: the old layer returned 'base + mag*s*lora' "
+                        "(magnitude applied only to the LoRA delta), while the new layer returns "
+                        "'(mag-1)*base + mag*s*lora' (matching DoRA paper Eq. 5). If this "
+                        "checkpoint was trained with an older PEFT version, the model may produce "
+                        "different outputs. Re-finetuning is recommended.",
+                        FutureWarning,
+                        stacklevel=2,
+                    )
         elif config.peft_type == PeftType.OFT:
             if any(".oft_r." in key for key in peft_model_state_dict):
                 raise ValueError(

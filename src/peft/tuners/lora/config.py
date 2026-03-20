@@ -571,6 +571,21 @@ class LoraConfig(PeftConfig):
             )
         },
     )
+    _dora_composition_version: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Internal version marker for the DoRA layer return-value contract. "
+                "Version 1 (or None): old embedding layer returned 'base + mag*s*lora' as its delta; "
+                "magnitude scaling was only applied to the LoRA component, not the base correction. "
+                "Version 2: layer returns '(mag-1)*base + mag*s*lora', matching the DoRA paper Eq. 5. "
+                "This field is set automatically and should not be changed by users. "
+                "Note: despite the underscore prefix (convention for private attributes), this field "
+                "IS intentionally included in the serialized config.json so that checkpoint loading "
+                "can detect old-format checkpoints and emit a FutureWarning."
+            )
+        },
+    )
     alora_invocation_tokens: Optional[list[int]] = field(
         default=None,
         metadata={
@@ -698,6 +713,9 @@ class LoraConfig(PeftConfig):
 
         if self.use_dora and self.megatron_config:
             raise ValueError("DoRA does not support megatron_core, please set `use_dora=False`.")
+
+        if self.use_dora and self._dora_composition_version is None:
+            self._dora_composition_version = 2
 
         # handle init_lora_weights and loftq_config
         if self.init_lora_weights == "loftq":
